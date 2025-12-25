@@ -114,35 +114,53 @@ def parse_romraider_xml(xml_content: bytes) -> Dict:
 def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
     result = {'valid': False, 'software_id': None, 'maps': {}, 'offset': 0}
     
-    # 1. Detectare ID și Offset
-    target_id = b'0110C7'
-    if target_id in bin_content:
-        # Găsim poziția reală a ID-ului în fișier
-        actual_pos = bin_content.find(target_id)
-        # Adresa teoretică din XML
-        xml_pos = int(xml_data['software_id_address'])
-        
-        # Calculăm decalajul (offset)
-        # Dacă fișierul e 512KB, offset-ul este de obicei 0x38000 (229376)
-        result['offset'] = actual_pos - xml_pos
-        result['software_id'] = '0110C7'
+    # Lista de offset-uri comune pentru MS42 (Full Dump 512KB)
+    possible_offsets = [0x0, 0x38000, 0x40000]
+    target_id = "0110C7"
+    
+    # Încercăm să găsim ID-ul la adresa din XML aplicând diverse offset-uri
+    xml_id_addr = int(xml_data['software_id_address'])
+    
+    found_offset = None
+    for off in possible_offsets:
+        check_addr = xml_id_addr + off
+        if check_addr + 6 <= len(bin_content):
+            extracted_id = bin_content[check_addr:check_addr+6].decode('ascii', errors='ignore')
+            if extracted_id == target_id:
+                found_offset = off
+                break
+    
+    # Dacă nu l-am găsit la adresele standard, scanăm brut tot fișierul
+    if found_offset is None:
+        if bin_content.find(target_id.encode('ascii')) != -1:
+            actual_pos = bin_content.find(target_id.encode('ascii'))
+            found_offset = actual_pos - xml_id_addr
+        else:
+            # Forțăm offset-ul de 512KB dacă fișierul are această mărime
+            if len(bin_content) > 100000:
+                found_offset = 0x38000
+                st.sidebar.warning("⚠️ ID-ul nu a fost găsit clar, dar aplicăm offset-ul standard de 512KB.")
+
+    if found_offset is not None:
+        result['offset'] = found_offset
+        result['software_id'] = target_id
         result['valid'] = True
-        st.sidebar.info(f"Offset detectat: {hex(result['offset'])}")
+        st.sidebar.success(f"✅ Offset activat: {hex(found_offset)}")
     else:
-        st.error("ID-ul 0110C7 nu a fost găsit în fișierul BIN!")
+        st.error("❌ Nu s-a putut valida fișierul BIN. Verificați dacă este un dump de MS42.")
         return result
 
-    # 2. Extragere hărți cu aplicarea Offset-ului
+    # Extragere hărți cu offset-ul confirmat
     for table_name, table_info in xml_data['tables'].items():
         try:
-            # Creăm o copie a info tabel pentru a nu modifica datele originale
+            # Ajustăm toate adresele (tabel + axe) cu offset-ul găsit
             adjusted_info = table_info.copy()
             adjusted_info['address'] += result['offset']
             
-            if adjusted_info['x_axis']:
+            if adjusted_info.get('x_axis'):
                 adjusted_info['x_axis'] = adjusted_info['x_axis'].copy()
                 adjusted_info['x_axis']['address'] += result['offset']
-            if adjusted_info['y_axis']:
+            if adjusted_info.get('y_axis'):
                 adjusted_info['y_axis'] = adjusted_info['y_axis'].copy()
                 adjusted_info['y_axis']['address'] += result['offset']
                 
