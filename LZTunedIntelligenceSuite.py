@@ -114,63 +114,77 @@ def parse_romraider_xml(xml_content: bytes) -> Dict:
 def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
     result = {'valid': False, 'software_id': None, 'maps': {}, 'offset': 0}
     
-    # Lista de offset-uri comune pentru MS42 (Full Dump 512KB)
-    possible_offsets = [0x0, 0x38000, 0x40000]
-    target_id = "0110C7"
-    
-    # Încercăm să găsim ID-ul la adresa din XML aplicând diverse offset-uri
-    xml_id_addr = int(xml_data['software_id_address'])
-    
-    found_offset = None
-    for off in possible_offsets:
-        check_addr = xml_id_addr + off
-        if check_addr + 6 <= len(bin_content):
-            extracted_id = bin_content[check_addr:check_addr+6].decode('ascii', errors='ignore')
-            if extracted_id == target_id:
-                found_offset = off
-                break
-    
-    # Dacă nu l-am găsit la adresele standard, scanăm brut tot fișierul
-    if found_offset is None:
-        if bin_content.find(target_id.encode('ascii')) != -1:
-            actual_pos = bin_content.find(target_id.encode('ascii'))
-            found_offset = actual_pos - xml_id_addr
-        else:
-            # Forțăm offset-ul de 512KB dacă fișierul are această mărime
-            if len(bin_content) > 100000:
-                found_offset = 0x38000
-                st.sidebar.warning("⚠️ ID-ul nu a fost găsit clar, dar aplicăm offset-ul standard de 512KB.")
-
-    if found_offset is not None:
-        result['offset'] = found_offset
-        result['software_id'] = target_id
-        result['valid'] = True
-        st.sidebar.success(f"✅ Offset activat: {hex(found_offset)}")
-    else:
-        st.error("❌ Nu s-a putut valida fișierul BIN. Verificați dacă este un dump de MS42.")
+    # Verificăm dacă xml_data este valid
+    if not xml_data or 'software_id_address' not in xml_data or xml_data['software_id_address'] is None:
+        st.error("❌ Definiția XML nu conține o adresă validă pentru Software ID.")
         return result
 
-    # Extragere hărți cu offset-ul confirmat
-    for table_name, table_info in xml_data['tables'].items():
+    try:
+        # Transformăm adresa în INT în siguranță
         try:
-            # Ajustăm toate adresele (tabel + axe) cu offset-ul găsit
-            adjusted_info = table_info.copy()
-            adjusted_info['address'] += result['offset']
-            
-            if adjusted_info.get('x_axis'):
-                adjusted_info['x_axis'] = adjusted_info['x_axis'].copy()
-                adjusted_info['x_axis']['address'] += result['offset']
-            if adjusted_info.get('y_axis'):
-                adjusted_info['y_axis'] = adjusted_info['y_axis'].copy()
-                adjusted_info['y_axis']['address'] += result['offset']
+            xml_id_addr = int(str(xml_data['software_id_address']), 0) # Suportă și hex (0x) și decimal
+        except ValueError:
+            st.error(f"❌ Adresa ID din XML este invalidă: {xml_data['software_id_address']}")
+            return result
+
+        possible_offsets = [0x0, 0x38000, 0x40000]
+        target_id = "0110C7"
+        found_offset = None
+
+        # Scanare Offset
+        for off in possible_offsets:
+            check_addr = xml_id_addr + off
+            if check_addr + 6 <= len(bin_content):
+                try:
+                    extracted_id = bin_content[check_addr:check_addr+6].decode('ascii', errors='ignore')
+                    if extracted_id == target_id:
+                        found_offset = off
+                        break
+                except:
+                    continue
+
+        # Fallback dacă nu găsim ID-ul fix
+        if found_offset is None:
+            if bin_content.find(target_id.encode('ascii')) != -1:
+                actual_pos = bin_content.find(target_id.encode('ascii'))
+                found_offset = actual_pos - xml_id_addr
+            elif len(bin_content) > 100000: # Presupunem Full Dump 512KB
+                found_offset = 0x38000
+                st.sidebar.warning("⚠️ Forțare Offset standard 512KB (0x38000)")
+
+        if found_offset is not None:
+            result['offset'] = found_offset
+            result['software_id'] = target_id
+            result['valid'] = True
+            st.sidebar.success(f"✅ Offset detectat: {hex(found_offset)}")
+        else:
+            st.error("❌ Nu am putut localiza ID-ul software în fișierul BIN.")
+            return result
+
+        # Extragere hărți
+        for table_name, table_info in xml_data.get('tables', {}).items():
+            try:
+                adj_info = table_info.copy()
+                adj_info['address'] += result['offset']
                 
-            map_data = extract_map_data(bin_content, adjusted_info)
-            if map_data['z_data'] is not None:
-                result['maps'][table_name] = map_data
-        except:
-            continue
-            
-    return result
+                # Ajustare axe
+                if adj_info.get('x_axis') and 'address' in adj_info['x_axis']:
+                    adj_info['x_axis'] = adj_info['x_axis'].copy()
+                    adj_info['x_axis']['address'] += result['offset']
+                if adj_info.get('y_axis') and 'address' in adj_info['y_axis']:
+                    adj_info['y_axis'] = adj_info['y_axis'].copy()
+                    adj_info['y_axis']['address'] += result['offset']
+                    
+                map_data = extract_map_data(bin_content, adj_info)
+                if map_data and map_data.get('z_data') is not None:
+                    result['maps'][table_name] = map_data
+            except:
+                continue
+                
+        return result
+    except Exception as e:
+        st.error(f"Eroare neașteptată: {str(e)}")
+        return result
     
 def extract_map_data(bin_content: bytes, table_info: Dict) -> Dict:
     """Extrage datele unei hărți din fișierul BIN."""
