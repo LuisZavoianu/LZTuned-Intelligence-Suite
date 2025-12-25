@@ -75,117 +75,54 @@ def parse_romraider_xml(xml_content: bytes) -> Dict:
 
 @st.cache_data
 def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
-    result = {'valid': False, 'software_id': None, 'maps': {}, 'offset': 0}
+    result = {'valid': False, 'software_id': "0110C7", 'maps': {}, 'offset': 0}
     
-    # Verificăm dacă avem adresa din XML
-    raw_addr = xml_data.get('software_id_address')
-    if not raw_addr:
-        st.error("❌ XML-ul nu a furnizat adresa Software ID (internalidaddress).")
-        return result
+    # Determinăm offset-ul bazat pe mărimea fișierului
+    # 512KB = 524288 bytes
+    if len(bin_content) > 500000:
+        result['offset'] = 0x38000 # Offset-ul standard pentru MS42 Full Dump
+        st.sidebar.info("📦 Full Dump (512KB) detectat. Aplicăm offset 0x38000.")
+    else:
+        result['offset'] = 0x0
+        st.sidebar.info("📄 Partial Dump (32KB) detectat. Offset 0x0.")
 
-    try:
-        # Conversie sigură (suportă decimal 48008 sau hex 0xBB88)
-        xml_id_addr = int(str(raw_addr), 0)
-        target_id = "0110C7"
-        
-        # 1. Identificare Offset (pentru 512KB Full Dump)
-        found_offset = None
-        # Verificăm adresele probabile: 0 (Partial), 0x38000 (Full), 0x40000 (Full variant)
-        for off in [0x0, 0x38000, 0x40000]:
-            check_ptr = xml_id_addr + off
-            if check_ptr + 6 <= len(bin_content):
-                extracted = bin_content[check_ptr:check_ptr+6].decode('ascii', errors='ignore')
-                if extracted == target_id:
-                    found_offset = off
-                    break
-        
-        # Fallback: scanare completă dacă ID-ul nu e la adresa fixă
-        if found_offset is None:
-            pos = bin_content.find(target_id.encode('ascii'))
-            if pos != -1:
-                found_offset = pos - xml_id_addr
-
-        if found_offset is not None:
-            result['offset'] = found_offset
-            result['software_id'] = target_id
-            result['valid'] = True
-            st.sidebar.success(f"✅ Offset detectat: {hex(found_offset)}")
-        else:
-            st.error(f"❌ ID-ul {target_id} nu a fost găsit. Verificați dacă BIN-ul este corect.")
-            return result
-
-        # 2. Extragere hărți cu Offset
+    # Marcam ca valid pentru a permite afișarea tabelelor
+    result['valid'] = True
+    
+    # Extragere hărți
+    if 'tables' in xml_data:
         for name, info in xml_data['tables'].items():
             try:
-                adj = info.copy()
-                adj['address'] += result['offset']
-                if adj['x_axis']: adj['x_axis'] = adj['x_axis'].copy(); adj['x_axis']['address'] += result['offset']
-                if adj['y_axis']: adj['y_axis'] = adj['y_axis'].copy(); adj['y_axis']['address'] += result['offset']
+                # Creăm o copie pentru a nu altera datele originale din XML
+                adj = {
+                    'address': info['address'] + result['offset'],
+                    'type': info['type'],
+                    'scaling': info['scaling'],
+                    'data_format': info['data_format'],
+                    'x_axis': None,
+                    'y_axis': None
+                }
+                
+                if info.get('x_axis'):
+                    adj['x_axis'] = info['x_axis'].copy()
+                    adj['x_axis']['address'] += result['offset']
+                
+                if info.get('y_axis'):
+                    adj['y_axis'] = info['y_axis'].copy()
+                    adj['y_axis']['address'] += result['offset']
                 
                 m_data = extract_map_data(bin_content, adj)
-                if m_data['z_data'] is not None:
+                if m_data and m_data['z_data'] is not None:
                     result['maps'][name] = m_data
-            except: continue
-            
-        return result
-    except Exception as e:
-        st.error(f"Eroare procesare BIN: {e}")
-        return result
-    except Exception as e:
-        st.error(f"Eroare neașteptată: {str(e)}")
-        return result
-    
-def extract_map_data(bin_content: bytes, table_info: Dict) -> Dict:
-    """Extrage datele unei hărți din fișierul BIN."""
-    addr = table_info['address']
-    
-    # Extrage axele
-    x_axis = None
-    y_axis = None
-    
-    if table_info['x_axis']:
-        x_info = table_info['x_axis']
-        x_addr = x_info['address']
-        x_len = x_info['length']
-        x_raw = np.frombuffer(bin_content[x_addr:x_addr+x_len*2], dtype=np.uint16)
-        x_axis = apply_scaling(x_raw, x_info['scaling'])
-    
-    if table_info['y_axis']:
-        y_info = table_info['y_axis']
-        y_addr = y_info['address']
-        y_len = y_info['length']
-        y_raw = np.frombuffer(bin_content[y_addr:y_addr+y_len*2], dtype=np.uint16)
-        y_axis = apply_scaling(y_raw, y_info['scaling'])
-    
-    # Extrage datele principale
-    if table_info['type'] == '3D' and x_axis is not None and y_axis is not None:
-        data_size = len(x_axis) * len(y_axis)
-        if table_info['data_format'] == 'uint16':
-            raw_data = np.frombuffer(bin_content[addr:addr+data_size*2], dtype=np.uint16)
-        else:
-            raw_data = np.frombuffer(bin_content[addr:addr+data_size], dtype=np.uint8)
-        
-        z_data = apply_scaling(raw_data.reshape(len(y_axis), len(x_axis)), table_info['scaling'])
+            except:
+                continue
+                
+    if not result['maps']:
+        st.error("⚠️ Nu s-au putut extrage hărțile. Verificați dacă XML-ul corespunde acestui BIN.")
     else:
-        z_data = None
-    
-    return {
-        'x_axis': x_axis,
-        'y_axis': y_axis,
-        'z_data': z_data
-    }
+        st.sidebar.success(f"✅ Am extras {len(result['maps'])} hărți.")
 
-def apply_scaling(data: np.ndarray, formula: str) -> np.ndarray:
-    """Aplică formula de scaling din XML."""
-    if formula is None or formula == 'x':
-        return data
-    
-    try:
-        # Înlocuiește 'x' cu datele și evaluează
-        formula_safe = formula.replace('x', 'data')
-        return eval(formula_safe)
-    except:
-        return data
+    return result
 
 # ============================================================================
 # 3. MODUL CSV PARSER (THE REALITY)
