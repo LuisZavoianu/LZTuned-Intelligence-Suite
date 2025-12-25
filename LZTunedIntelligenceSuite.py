@@ -115,21 +115,26 @@ def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
     result = {'valid': False, 'software_id': None, 'maps': {}}
     
     try:
-        # Căutăm ID-ul 0110C7 oriunde în fișier (metoda sigură)
+        # Metoda 1: Căutare directă după semnătura MS42 (0110C7)
         if b'0110C7' in bin_content:
             result['software_id'] = '0110C7'
             result['valid'] = True
-        else:
-            # Dacă nu găsim 0110C7, încercăm să extragem ce ID există la adresa din XML
-            if xml_data['software_id_address']:
-                id_addr = int(xml_data['software_id_address'], 10) # 48008 din XML
+        
+        # Metoda 2: Dacă nu găsește semnătura, încearcă adresa din XML
+        elif xml_data['software_id_address']:
+            id_addr = int(xml_data['software_id_address'])
+            # Verificăm dacă adresa este validă pentru mărimea fișierului
+            if id_addr < len(bin_content):
                 software_id = bin_content[id_addr:id_addr+6].decode('ascii', errors='ignore')
                 result['software_id'] = software_id
-                result['valid'] = True # Forțăm validarea pentru a vedea hărțile
-        
-        # Extrage datele pentru fiecare hartă chiar dacă ID-ul e suspect
+                result['valid'] = True
+
+        # Procesare hărți (chiar dacă validarea e forțată)
         for table_name, table_info in xml_data['tables'].items():
             try:
+                # Ajustare offset pentru fișiere de 512KB
+                # Majoritatea tabelelor în MS42 512KB sunt decalate cu 0x38000 sau 0x40000
+                # Dar pentru început, încercăm adresa brută
                 map_data = extract_map_data(bin_content, table_info)
                 if map_data['z_data'] is not None:
                     result['maps'][table_name] = map_data
@@ -138,7 +143,7 @@ def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
                 
         return result
     except Exception as e:
-        st.error(f"Eroare critică la citirea BIN: {e}")
+        st.error(f"Eroare la citirea BIN: {e}")
         return result
 
 def extract_map_data(bin_content: bytes, table_info: Dict) -> Dict:
