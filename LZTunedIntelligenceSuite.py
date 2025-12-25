@@ -112,40 +112,48 @@ def parse_romraider_xml(xml_content: bytes) -> Dict:
 # ============================================================================
 @st.cache_data
 def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
-    result = {'valid': False, 'software_id': None, 'maps': {}}
+    result = {'valid': False, 'software_id': None, 'maps': {}, 'offset': 0}
     
-    try:
-        # Metoda 1: Căutare directă după semnătura MS42 (0110C7)
-        if b'0110C7' in bin_content:
-            result['software_id'] = '0110C7'
-            result['valid'] = True
+    # 1. Detectare ID și Offset
+    target_id = b'0110C7'
+    if target_id in bin_content:
+        # Găsim poziția reală a ID-ului în fișier
+        actual_pos = bin_content.find(target_id)
+        # Adresa teoretică din XML
+        xml_pos = int(xml_data['software_id_address'])
         
-        # Metoda 2: Dacă nu găsește semnătura, încearcă adresa din XML
-        elif xml_data['software_id_address']:
-            id_addr = int(xml_data['software_id_address'])
-            # Verificăm dacă adresa este validă pentru mărimea fișierului
-            if id_addr < len(bin_content):
-                software_id = bin_content[id_addr:id_addr+6].decode('ascii', errors='ignore')
-                result['software_id'] = software_id
-                result['valid'] = True
+        # Calculăm decalajul (offset)
+        # Dacă fișierul e 512KB, offset-ul este de obicei 0x38000 (229376)
+        result['offset'] = actual_pos - xml_pos
+        result['software_id'] = '0110C7'
+        result['valid'] = True
+        st.sidebar.info(f"Offset detectat: {hex(result['offset'])}")
+    else:
+        st.error("ID-ul 0110C7 nu a fost găsit în fișierul BIN!")
+        return result
 
-        # Procesare hărți (chiar dacă validarea e forțată)
-        for table_name, table_info in xml_data['tables'].items():
-            try:
-                # Ajustare offset pentru fișiere de 512KB
-                # Majoritatea tabelelor în MS42 512KB sunt decalate cu 0x38000 sau 0x40000
-                # Dar pentru început, încercăm adresa brută
-                map_data = extract_map_data(bin_content, table_info)
-                if map_data['z_data'] is not None:
-                    result['maps'][table_name] = map_data
-            except:
-                continue
+    # 2. Extragere hărți cu aplicarea Offset-ului
+    for table_name, table_info in xml_data['tables'].items():
+        try:
+            # Creăm o copie a info tabel pentru a nu modifica datele originale
+            adjusted_info = table_info.copy()
+            adjusted_info['address'] += result['offset']
+            
+            if adjusted_info['x_axis']:
+                adjusted_info['x_axis'] = adjusted_info['x_axis'].copy()
+                adjusted_info['x_axis']['address'] += result['offset']
+            if adjusted_info['y_axis']:
+                adjusted_info['y_axis'] = adjusted_info['y_axis'].copy()
+                adjusted_info['y_axis']['address'] += result['offset']
                 
-        return result
-    except Exception as e:
-        st.error(f"Eroare la citirea BIN: {e}")
-        return result
-
+            map_data = extract_map_data(bin_content, adjusted_info)
+            if map_data['z_data'] is not None:
+                result['maps'][table_name] = map_data
+        except:
+            continue
+            
+    return result
+    
 def extract_map_data(bin_content: bytes, table_info: Dict) -> Dict:
     """Extrage datele unei hărți din fișierul BIN."""
     addr = table_info['address']
