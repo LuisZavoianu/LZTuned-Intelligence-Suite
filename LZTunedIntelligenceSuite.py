@@ -24,133 +24,86 @@ st.set_page_config(
 # ============================================================================
 @st.cache_data
 def parse_romraider_xml(xml_content: bytes) -> Dict:
-    """
-    Parsează XML-ul RomRaider și extrage definițiile hărților ECU.
-    
-    Returns:
-        Dict cu structura: {
-            'software_id_address': str,
-            'tables': {
-                'table_name': {
-                    'address': int,
-                    'type': str,
-                    'scaling': str,
-                    'x_axis': {...},
-                    'y_axis': {...}
-                }
-            }
-        }
-    """
     try:
         root = ET.fromstring(xml_content)
-        result = {
-            'software_id_address': None,
-            'tables': {}
-        }
+        result = {'software_id_address': None, 'tables': {}}
         
-        # Caută internal ID address
-        for rom in root.findall('.//rom'):
-            id_addr = rom.get('internalidaddress')
-            if id_addr:
-                result['software_id_address'] = id_addr
-                break
+        # Căutare îmbunătățită pentru internalidaddress
+        id_element = root.find('.//internalidaddress')
+        if id_element is not None:
+            result['software_id_address'] = id_element.text
+            st.sidebar.success(f"📍 Adresă ID găsită în XML: {id_element.text}")
         
-        # Parsează toate tabelele
+        # Parsează tabelele
         for table in root.findall('.//table'):
-            table_name = table.get('name', 'Unknown')
+            table_name = table.get('name')
             storage_addr = table.get('storageaddress')
-            table_type = table.get('type', '3D')
-            
-            if not storage_addr:
+            if not table_name or not storage_addr:
                 continue
-            
+                
             table_data = {
                 'address': int(storage_addr, 16),
-                'type': table_type,
+                'type': table.get('type', '3D'),
                 'scaling': None,
                 'x_axis': None,
                 'y_axis': None,
                 'data_format': table.get('storagetype', 'uint8')
             }
             
-            # Extrage scaling formula
             scaling = table.find('.//scaling')
             if scaling is not None:
                 table_data['scaling'] = scaling.get('expression', 'x')
-            
-            # Extrage axele
-            for axis in table.findall('.//table'):
-                axis_type = axis.get('type')
-                axis_addr = axis.get('storageaddress')
                 
-                if axis_type and axis_addr:
-                    axis_data = {
-                        'address': int(axis_addr, 16),
+            for axis in table.findall('.//table'):
+                a_type = axis.get('type')
+                a_addr = axis.get('storageaddress')
+                if a_type and a_addr:
+                    axis_info = {
+                        'address': int(a_addr, 16),
                         'length': int(axis.get('length', '0')),
-                        'scaling': None
+                        'scaling': axis.find('.//scaling').get('expression', 'x') if axis.find('.//scaling') is not None else 'x'
                     }
-                    
-                    axis_scaling = axis.find('.//scaling')
-                    if axis_scaling is not None:
-                        axis_data['scaling'] = axis_scaling.get('expression', 'x')
-                    
-                    if 'X' in axis_type:
-                        table_data['x_axis'] = axis_data
-                    elif 'Y' in axis_type:
-                        table_data['y_axis'] = axis_data
+                    if 'X' in a_type: table_data['x_axis'] = axis_info
+                    elif 'Y' in a_type: table_data['y_axis'] = axis_info
             
             result['tables'][table_name] = table_data
-        
+            
         return result
-    
     except Exception as e:
         st.error(f"Eroare parsare XML: {e}")
         return {'software_id_address': None, 'tables': {}}
 
-# ============================================================================
-# 2. MODUL BIN READER (THE SOURCE)
-# ============================================================================
 @st.cache_data
 def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
     result = {'valid': False, 'software_id': None, 'maps': {}, 'offset': 0}
     
-    # Verificăm dacă xml_data este valid
-    if not xml_data or 'software_id_address' not in xml_data or xml_data['software_id_address'] is None:
-        st.error("❌ Definiția XML nu conține o adresă validă pentru Software ID.")
+    # Verificăm dacă avem adresa din XML
+    raw_addr = xml_data.get('software_id_address')
+    if not raw_addr:
+        st.error("❌ XML-ul nu a furnizat adresa Software ID (internalidaddress).")
         return result
 
     try:
-        # Transformăm adresa în INT în siguranță
-        try:
-            xml_id_addr = int(str(xml_data['software_id_address']), 0) # Suportă și hex (0x) și decimal
-        except ValueError:
-            st.error(f"❌ Adresa ID din XML este invalidă: {xml_data['software_id_address']}")
-            return result
-
-        possible_offsets = [0x0, 0x38000, 0x40000]
+        # Conversie sigură (suportă decimal 48008 sau hex 0xBB88)
+        xml_id_addr = int(str(raw_addr), 0)
         target_id = "0110C7"
+        
+        # 1. Identificare Offset (pentru 512KB Full Dump)
         found_offset = None
-
-        # Scanare Offset
-        for off in possible_offsets:
-            check_addr = xml_id_addr + off
-            if check_addr + 6 <= len(bin_content):
-                try:
-                    extracted_id = bin_content[check_addr:check_addr+6].decode('ascii', errors='ignore')
-                    if extracted_id == target_id:
-                        found_offset = off
-                        break
-                except:
-                    continue
-
-        # Fallback dacă nu găsim ID-ul fix
+        # Verificăm adresele probabile: 0 (Partial), 0x38000 (Full), 0x40000 (Full variant)
+        for off in [0x0, 0x38000, 0x40000]:
+            check_ptr = xml_id_addr + off
+            if check_ptr + 6 <= len(bin_content):
+                extracted = bin_content[check_ptr:check_ptr+6].decode('ascii', errors='ignore')
+                if extracted == target_id:
+                    found_offset = off
+                    break
+        
+        # Fallback: scanare completă dacă ID-ul nu e la adresa fixă
         if found_offset is None:
-            if bin_content.find(target_id.encode('ascii')) != -1:
-                actual_pos = bin_content.find(target_id.encode('ascii'))
-                found_offset = actual_pos - xml_id_addr
-            elif len(bin_content) > 100000: # Presupunem Full Dump 512KB
-                found_offset = 0x38000
-                st.sidebar.warning("⚠️ Forțare Offset standard 512KB (0x38000)")
+            pos = bin_content.find(target_id.encode('ascii'))
+            if pos != -1:
+                found_offset = pos - xml_id_addr
 
         if found_offset is not None:
             result['offset'] = found_offset
@@ -158,29 +111,25 @@ def read_bin_file(bin_content: bytes, xml_data: Dict) -> Dict:
             result['valid'] = True
             st.sidebar.success(f"✅ Offset detectat: {hex(found_offset)}")
         else:
-            st.error("❌ Nu am putut localiza ID-ul software în fișierul BIN.")
+            st.error(f"❌ ID-ul {target_id} nu a fost găsit. Verificați dacă BIN-ul este corect.")
             return result
 
-        # Extragere hărți
-        for table_name, table_info in xml_data.get('tables', {}).items():
+        # 2. Extragere hărți cu Offset
+        for name, info in xml_data['tables'].items():
             try:
-                adj_info = table_info.copy()
-                adj_info['address'] += result['offset']
+                adj = info.copy()
+                adj['address'] += result['offset']
+                if adj['x_axis']: adj['x_axis'] = adj['x_axis'].copy(); adj['x_axis']['address'] += result['offset']
+                if adj['y_axis']: adj['y_axis'] = adj['y_axis'].copy(); adj['y_axis']['address'] += result['offset']
                 
-                # Ajustare axe
-                if adj_info.get('x_axis') and 'address' in adj_info['x_axis']:
-                    adj_info['x_axis'] = adj_info['x_axis'].copy()
-                    adj_info['x_axis']['address'] += result['offset']
-                if adj_info.get('y_axis') and 'address' in adj_info['y_axis']:
-                    adj_info['y_axis'] = adj_info['y_axis'].copy()
-                    adj_info['y_axis']['address'] += result['offset']
-                    
-                map_data = extract_map_data(bin_content, adj_info)
-                if map_data and map_data.get('z_data') is not None:
-                    result['maps'][table_name] = map_data
-            except:
-                continue
-                
+                m_data = extract_map_data(bin_content, adj)
+                if m_data['z_data'] is not None:
+                    result['maps'][name] = m_data
+            except: continue
+            
+        return result
+    except Exception as e:
+        st.error(f"Eroare procesare BIN: {e}")
         return result
     except Exception as e:
         st.error(f"Eroare neașteptată: {str(e)}")
